@@ -1,0 +1,9 @@
+name = "ArchiverService"
+
+[deps]
+Aeron = "42ac8a32-990f-4d8c-aece-52d731103226"
+DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
+DuckDB = "d2f5444f-75bc-4fdf-ac35-56f514c445e1"
+DuckDB_jll = "2cbbab25-fc8b-58cf-88d4-687a02676033"
+SQLite = "0aa819cd-b072-5ff4-a722-6bc24af294d9"
+SpidersMessageEncoding = "25d647a0-ef7d-4da3-8ba8-11abaa3d526c"
