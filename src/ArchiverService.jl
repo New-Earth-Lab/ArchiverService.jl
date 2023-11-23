@@ -2,6 +2,7 @@ module ArchiverService
 using Aeron
 using SQLite
 using Dates
+using StaticStrings
 using SpidersMessageEncoding
 
 # We create a SQLite table for each night of observations. 
@@ -25,9 +26,9 @@ function main(ARGS)
     # Delay after which data is committed to the index even if we 
     # haven't accumulated a full batch.
     commit_delay_timeout = 5#30.0 # seconds
+
+    data_archive_rollover_filesize_bytes = 2^27 # approx 134Mb
     
-
-
     ctx = AeronContext()
 
     # TODO: list of multiple streams configured somewhere
@@ -39,7 +40,9 @@ function main(ARGS)
 
     confs = [conf]
 
-    db = SQLite.DB("data.sqlite")
+    index_db_fname = gen_index_db_filename()
+    println("Index of messages will be written to $index_db_fname")
+    db = SQLite.DB(index_db_fname)
 
     # Create table if not exists
     # Order columns in the order they are most likely to be filtered by.
@@ -47,45 +50,40 @@ function main(ARGS)
         CREATE TABLE IF NOT EXISTS message_index(
             TimestampNs BIGINT NOT NULL,
             correlationId BIGINT NOT NULL,
-            description VARCHAR(32) NOT NULL,
+            description BLOB NOT NULL,
             schemaId USMALLINT NOT NULL,
             templateId USMALLINT NOT NULL,
             blockLength USMALLINT NOT NULL,
             version USMALLINT NOT NULL,
             channelRcvTimestampNs BIGINT NOT NULL,
-            channelSndTimestampNs BIGINT NOT NULL
+            channelSndTimestampNs BIGINT NOT NULL,
+            data_fname BLOB NOT NULL,
+            data_start_index BIGINT NOT NULL
         )
     """)
+
 
     # To keep up with the message rate, we will do bulk inserts.
     # We will create our own table of N rows and write to these as we go.
     # When we reach the end (or maybe a timeout is reached??) or close,
     # we will write these rows en-mass to the SQL DB.
 
-    # chunk_N = 1000
-    # bulk_insert_table = (;
-    #     TimestampNs   = zeros(Int64, chunk_N),
-    #     correlationId = zeros(Int64, chunk_N),
-    #     description   = fill(NTuple{32,UInt8}(zeros(UInt8,32)), chunk_N),
-    #     schemaId      = zeros(UInt64, chunk_N),
-    #     templateId    = zeros(UInt64, chunk_N),
-    #     blockLength   = zeros(UInt64, chunk_N),
-    #     version       = zeros(UInt64, chunk_N),
-    #     channelRcvTimestampNs = zeros(Int64, chunk_N),
-    #     channelSndTimestampNs = zeros(Int64, chunk_N),
-    # )
     # Row table version should be faster while building it up.
     bulk_insert_table = fill((;
         TimestampNs   = zero(Int64),
         correlationId = zero(Int64),
-        # NTuple{32,UInt8}
-        description   = ntuple((_)->0x00, Val(32)),
+        description   = ntuple((_)->0x00, Val(32)), # NTuple{32,UInt8}
         schemaId      = zero(UInt64),
         templateId    = zero(UInt64),
         blockLength   = zero(UInt64),
         version       = zero(UInt64),
         channelRcvTimestampNs = zero(Int64),
         channelSndTimestampNs = zero(Int64),
+        # These are the actual index values that say where a message is stored in the
+        # raw file.
+        data_fname   = ntuple((_)->0x00, Val(32)), # NTuple{32,UInt8}
+        data_start_index = zero(UInt64)
+
     ), chunk_N)
 
 
@@ -95,9 +93,13 @@ function main(ARGS)
         Aeron.subscriber(ctx, conf)
     end
 
-
+    # we use a cstatic string here which is just a view over bytes
+    # This is because we have to put it in the datatable repeatedly
     current_data_fname = gen_rawdata_filename()
-    data_file = open(current_data_fname, write=true)
+    
+
+    # When actually opening a file, we make it into a normal string
+    data_file = open(strip(String(current_data_fname),'\0'), write=true)
 
     # We increment row_i for each message received. 
     # Once we reach chunk_N, we send to the DB and resume.
@@ -129,35 +131,44 @@ function main(ARGS)
                 # well hit a GC here. Thankfully, these GC pauses are 
                 # usually a few tens of ms, so of a similar cost to 
                 # the data loading itself.
-                @time SQLite.load!(@view(bulk_insert_table[begin:row_i]), db, "temp")
-                println("committed to index.")
+                println("committing $row_i message receipt(s) to index database.")
+                @time SQLite.load!(@view(bulk_insert_table[begin:row_i]), db, "message_index")
                 row_i = 0
                 last_commit_time = t
             end
             # TODO: periodically roll over the raw data file so it doesn't grow to large
-            # if data_i 
-            # end
+            if data_i > data_archive_rollover_filesize_bytes
+                println("Rolling over to new data archive.")
+                println("Closing $current_data_fname")
+                @showtime close(data_file)
+                current_data_fname = gen_rawdata_filename()
+                println("New file will be $current_data_fname")
+                data_file = open(strip(String(current_data_fname),'\0'), write=true)
+                data_i = 0
+            end
             for sub in subscriptions
                 fragments, data = Aeron.poll(sub)
                 if !isnothing(data)
-                    begin
-                        row_i += 1
-                        println("received")
+                    @time begin
+                        row_i_this = row_i + 1
                         msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
-                        bulk_insert_table[row_i] = (;
+                        bulk_insert_table[row_i_this] = (;
                             msg.header.TimestampNs,
                             msg.header.correlationId,
-                            msg.header.description,
+                            description=convert(NTuple{32,UInt8}, msg.header.description),
                             msg.messageHeader.schemaId,
                             msg.messageHeader.templateId,
                             msg.messageHeader.blockLength,
                             msg.messageHeader.version,
                             msg.header.channelRcvTimestampNs,
                             msg.header.channelSndTimestampNs,
+                            data_fname = convert(NTuple{32,UInt8},current_data_fname),
+                            data_start_index = data_i
                         )
                         # display(SpidersMessageEncoding.sbedecode(data.buffer))
                         write(data_file, data.buffer)
                         data_i += length(data.buffer)
+                        row_i = row_i_this
                     end
                 end
             end
@@ -167,8 +178,8 @@ function main(ARGS)
     finally
         # Error, only commit up to the last message and not any junk left after it
         if 0 < row_i <= chunk_N
-            @time SQLite.load!(view(bulk_insert_table[1:row_i]), db, "temp")
-            println("committed partial results to table.")
+            println("committing partial results to table.")
+            @time SQLite.load!(@view(bulk_insert_table[1:row_i]), db, "message_index")
             row_i = 0
         end
     end
@@ -177,15 +188,25 @@ function main(ARGS)
     
 end
 
+function gen_index_db_filename()
+    dt = Dates.now()
+    fname = "INDEX-"*Dates.format(dt, "yyyy-mm-dd")*".sqlite"
+    return fname
+end
+
 
 function gen_rawdata_filename()
     dt = Dates.now()
-    fname = "RAW-"*Dates.format(dt, "yyyy-mm-dd-HH-MM-SS")*".raw"
-    if isfile(fname)
-        @warn "File name already exists, will roll over to .2.raw" fname
-        fname = replace(fname, ".raw"=>".2.raw")
+    fname = "RAW-"*Dates.format(dt, "yyyy-mm-dd-HH-MM-SS")*".1.raw"
+    i = 1
+    # Avoid clobbering files at all cost.
+    # We should never hit this realistically since the fname is timestamped down to the second.
+    while isfile(fname)
+        i += 1
+        @warn "File name already exists, will roll over to .$i.raw" fname
+        fname = replace(fname, ".$(i-1).raw"=>".$i.raw")
     end
-    return fname
+    return convert(CStaticString{32}, fname)
 end
 
 
