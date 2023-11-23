@@ -10,6 +10,7 @@ using SQLite
 using DataFrames
 using StaticStrings
 using FITSIO
+using SpidersMessageEncoding
 
 function main(ARGS)
         
