@@ -27,7 +27,7 @@ function main(ARGS)
     # haven't accumulated a full batch.
     commit_delay_timeout = 5#30.0 # seconds
 
-    data_archive_rollover_filesize_bytes = 2^27 # approx 134Mb
+    data_archive_rollover_filesize_bytes = 2^30 # approx 1Gb
     
     ctx = AeronContext()
 
@@ -149,7 +149,7 @@ function main(ARGS)
             for sub in subscriptions
                 fragments, data = Aeron.poll(sub)
                 if !isnothing(data)
-                    @time begin
+                    begin
                         row_i_this = row_i + 1
                         msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
                         bulk_insert_table[row_i_this] = (;
