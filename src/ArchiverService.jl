@@ -96,10 +96,11 @@ function main(ARGS)
     # we use a cstatic string here which is just a view over bytes
     # This is because we have to put it in the datatable repeatedly
     current_data_fname = gen_rawdata_filename()
+    current_data_fname_c = convert(CStaticString{32}, current_data_fname)
     
 
     # When actually opening a file, we make it into a normal string
-    data_file = open(strip(String(current_data_fname),'\0'), write=true)
+    data_file = open(current_data_fname, write=true)
 
     # We increment row_i for each message received. 
     # Once we reach chunk_N, we send to the DB and resume.
@@ -140,10 +141,11 @@ function main(ARGS)
             if data_i > data_archive_rollover_filesize_bytes
                 println("Rolling over to new data archive.")
                 println("Closing $current_data_fname")
-                @showtime close(data_file)
+                close(data_file)
                 current_data_fname = gen_rawdata_filename()
+                current_data_fname_c = convert(CStaticString{32}, current_data_fname)
                 println("New file will be $current_data_fname")
-                data_file = open(strip(String(current_data_fname),'\0'), write=true)
+                data_file = open(current_data_fname, write=true)
                 data_i = 0
             end
             for sub in subscriptions
@@ -162,7 +164,7 @@ function main(ARGS)
                             msg.messageHeader.version,
                             msg.header.channelRcvTimestampNs,
                             msg.header.channelSndTimestampNs,
-                            data_fname = convert(NTuple{32,UInt8},current_data_fname),
+                            data_fname = convert(NTuple{32,UInt8},current_data_fname_c),
                             data_start_index = data_i
                         )
                         # display(SpidersMessageEncoding.sbedecode(data.buffer))
@@ -206,7 +208,7 @@ function gen_rawdata_filename()
         @warn "File name already exists, will roll over to .$i.raw" fname
         fname = replace(fname, ".$(i-1).raw"=>".$i.raw")
     end
-    return convert(CStaticString{32}, fname)
+    return fname
 end
 
 
