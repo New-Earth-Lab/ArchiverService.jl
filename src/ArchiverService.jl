@@ -164,11 +164,8 @@ function main(ARGS)
                         msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
                         # We'd rather not send strings containing NULL to SQlite as it will
                         # store as BLOB instead of TEXT.
-                        i_first_null = findfirst(==(0x00),msg.header.description)
-                        if isnothing(i_first_null)
-                            i_first_null = lastindex(msg.header.description)+1
-                        end
-                        desc_no_nulls = view(msg.header.description, 1:(i_first_null-1))
+                        # This trick gets around it.
+                        @time desc_no_nulls = view(msg.header.description, 1:lastindex(msg.header.description))
                         bulk_insert_table[row_i_this] = (;
                             msg.header.TimestampNs,
                             msg.header.correlationId,
