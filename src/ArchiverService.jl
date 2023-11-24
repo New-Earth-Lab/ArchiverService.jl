@@ -79,7 +79,7 @@ function main(ARGS)
     bulk_insert_table = fill((;
         TimestampNs   = zero(Int64),
         correlationId = zero(Int64),
-        description   = ntuple((_)->0x00, Val(32)), # NTuple{32,UInt8}
+        description   = view(cstatic""32, 1:0),
         schemaId      = zero(Int64),
         templateId    = zero(Int64),
         blockLength   = zero(Int64),
@@ -88,7 +88,7 @@ function main(ARGS)
         channelSndTimestampNs = zero(Int64),
         # These are the actual index values that say where a message is stored in the
         # raw file.
-        data_fname   = ntuple((_)->0x00, Val(32)), # NTuple{32,UInt8}
+        data_fname   = "",
         data_start_index = zero(Int64)
     ), chunk_N)
 
@@ -162,17 +162,24 @@ function main(ARGS)
                     begin
                         row_i_this = row_i + 1
                         msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
+                        # We'd rather not send strings containing NULL to SQlite as it will
+                        # store as BLOB instead of TEXT.
+                        i_first_null = findfirst(==(0x00),msg.header.description)
+                        if isnothing(i_first_null)
+                            i_first_null = lastindex(msg.header.description)+1
+                        end
+                        desc_no_nulls = view(msg.header.description, 1:(i_first_null-1))
                         bulk_insert_table[row_i_this] = (;
                             msg.header.TimestampNs,
                             msg.header.correlationId,
-                            description=msg.header.description,
+                            description=desc_no_nulls,
                             msg.messageHeader.schemaId,
                             msg.messageHeader.templateId,
                             msg.messageHeader.blockLength,
                             msg.messageHeader.version,
                             msg.header.channelRcvTimestampNs,
                             msg.header.channelSndTimestampNs,
-                            data_fname =current_data_fname_c,
+                            data_fname=current_data_fname,
                             data_start_index = data_i
                         )
                         # display(SpidersMessageEncoding.sbedecode(data.buffer))
