@@ -28,6 +28,12 @@ function main(ARGS)
     commit_delay_timeout = 5#30.0 # seconds
 
     data_archive_rollover_filesize_bytes = 2^30 # approx 1Gb
+
+    dir = joinpath(pwd(), Dates.format(Dates.now(), "yyyy-mm-dd"))
+    # dir = joinpath("/mnt/datadrive/DATA", Dates.format(Dates.now(), "yyyy-mm-dd"))
+    if !isdir(dir)
+        mkdir(dir)
+    end
     
     ctx = AeronContext()
 
@@ -41,24 +47,25 @@ function main(ARGS)
     confs = [conf]
 
     index_db_fname = gen_index_db_filename()
-    println("Index of messages will be written to $index_db_fname")
-    db = SQLite.DB(index_db_fname)
+    index_db_fname_dir = joinpath(dir, index_db_fname)
+    println("Index of messages will be written to $index_db_fname_dir")
+    db = SQLite.DB(index_db_fname_dir)
 
     # Create table if not exists
     # Order columns in the order they are most likely to be filtered by.
     DBInterface.execute(db, """
         CREATE TABLE IF NOT EXISTS message_index(
-            TimestampNs BIGINT NOT NULL,
-            correlationId BIGINT NOT NULL,
-            description BLOB NOT NULL,
-            schemaId USMALLINT NOT NULL,
-            templateId USMALLINT NOT NULL,
-            blockLength USMALLINT NOT NULL,
-            version USMALLINT NOT NULL,
-            channelRcvTimestampNs BIGINT NOT NULL,
-            channelSndTimestampNs BIGINT NOT NULL,
-            data_fname BLOB NOT NULL,
-            data_start_index BIGINT NOT NULL
+            TimestampNs INT NOT NULL,
+            correlationId INT NOT NULL,
+            description TEXT NOT NULL,
+            schemaId INT NOT NULL,
+            templateId INT NOT NULL,
+            blockLength INT NOT NULL,
+            version INT NOT NULL,
+            channelRcvTimestampNs INT NOT NULL,
+            channelSndTimestampNs INT NOT NULL,
+            data_fname TEXT NOT NULL,
+            data_start_index INT NOT NULL
         )
     """)
 
@@ -73,17 +80,16 @@ function main(ARGS)
         TimestampNs   = zero(Int64),
         correlationId = zero(Int64),
         description   = ntuple((_)->0x00, Val(32)), # NTuple{32,UInt8}
-        schemaId      = zero(UInt64),
-        templateId    = zero(UInt64),
-        blockLength   = zero(UInt64),
-        version       = zero(UInt64),
+        schemaId      = zero(Int64),
+        templateId    = zero(Int64),
+        blockLength   = zero(Int64),
+        version       = zero(Int64),
         channelRcvTimestampNs = zero(Int64),
         channelSndTimestampNs = zero(Int64),
         # These are the actual index values that say where a message is stored in the
         # raw file.
         data_fname   = ntuple((_)->0x00, Val(32)), # NTuple{32,UInt8}
-        data_start_index = zero(UInt64)
-
+        data_start_index = zero(Int64)
     ), chunk_N)
 
 
@@ -96,11 +102,12 @@ function main(ARGS)
     # we use a cstatic string here which is just a view over bytes
     # This is because we have to put it in the datatable repeatedly
     current_data_fname = gen_rawdata_filename()
+    current_data_fname_dir = joinpath(dir, current_data_fname)
     current_data_fname_c = convert(CStaticString{32}, current_data_fname)
     
 
     # When actually opening a file, we make it into a normal string
-    data_file = open(current_data_fname, write=true)
+    data_file = open(current_data_fname_dir, write=true)
 
     # We increment row_i for each message received. 
     # Once we reach chunk_N, we send to the DB and resume.
@@ -143,9 +150,10 @@ function main(ARGS)
                 println("Closing $current_data_fname")
                 close(data_file)
                 current_data_fname = gen_rawdata_filename()
+                current_data_fname_dir = joinpath(dir, current_data_fname)
                 current_data_fname_c = convert(CStaticString{32}, current_data_fname)
                 println("New file will be $current_data_fname")
-                data_file = open(current_data_fname, write=true)
+                data_file = open(current_data_fname_dir, write=true)
                 data_i = 0
             end
             for sub in subscriptions
@@ -157,14 +165,14 @@ function main(ARGS)
                         bulk_insert_table[row_i_this] = (;
                             msg.header.TimestampNs,
                             msg.header.correlationId,
-                            description=convert(NTuple{32,UInt8}, msg.header.description),
+                            description=msg.header.description,
                             msg.messageHeader.schemaId,
                             msg.messageHeader.templateId,
                             msg.messageHeader.blockLength,
                             msg.messageHeader.version,
                             msg.header.channelRcvTimestampNs,
                             msg.header.channelSndTimestampNs,
-                            data_fname = convert(NTuple{32,UInt8},current_data_fname_c),
+                            data_fname =current_data_fname_c,
                             data_start_index = data_i
                         )
                         # display(SpidersMessageEncoding.sbedecode(data.buffer))
