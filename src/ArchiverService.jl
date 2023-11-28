@@ -27,7 +27,7 @@ function main(ARGS)
 
     # SQL index-table bulk insert size. 10k is recommended.
     # Lower values are safer w.r.t. data-loss, but slower.
-    chunk_N = 1000
+    chunk_N = 5000
 
     # Delay after which data is committed to the index even if we 
     # haven't accumulated a full batch.
@@ -77,6 +77,8 @@ function main(ARGS)
             version INT NOT NULL,
             channelRcvTimestampNs INT NOT NULL,
             channelSndTimestampNs INT NOT NULL,
+            aeron_uri TEXT NOT NULL,
+            aeron_stream INT NOT NULL,
             data_fname TEXT NOT NULL,
             data_start_index INT NOT NULL
         )
@@ -99,6 +101,9 @@ function main(ARGS)
         version       = zero(Int64),
         channelRcvTimestampNs = zero(Int64),
         channelSndTimestampNs = zero(Int64),
+        # Where did we get the data?
+        aeron_uri    = "",
+        aeron_stream = zero(Int64),
         # These are the actual index values that say where a message is stored in the
         # raw file.
         data_fname   = "",
@@ -171,7 +176,7 @@ function main(ARGS)
                             @warn "can't subscribe without setting a non-zero stream number"
                         end
                         key = (pending_cmd.uri, pending_cmd.stream)
-                        if pending_cmd.enabled
+                        if pending_cmd.enabled && !haskey(aeron_stream_recording_dict, key)
                             println("Opening subscription $key")
                             conf = AeronConfig(;pending_cmd.uri, pending_cmd.stream)
                             aeron_stream_recording_dict[key] = Aeron.subscriber(ctx,conf)
@@ -225,34 +230,35 @@ function main(ARGS)
 
 
                 # Loop and poll all recording subscriptions
-                for (_, sub) in aeron_stream_recording_dict
+                for (key, sub) in aeron_stream_recording_dict
                     fragments, data = Aeron.poll(sub)
                     if !isnothing(data)
-                        begin
-                            row_i_this = row_i + 1
-                            msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
-                            # We'd rather not send strings containing NULL to SQlite as it will
-                            # store as BLOB instead of TEXT.
-                            # This trick gets around it.
-                            desc_no_nulls = view(msg.header.description, 1:lastindex(msg.header.description))
-                            bulk_insert_table[row_i_this] = (;
-                                msg.header.TimestampNs,
-                                msg.header.correlationId,
-                                description=desc_no_nulls,
-                                msg.messageHeader.schemaId,
-                                msg.messageHeader.templateId,
-                                msg.messageHeader.blockLength,
-                                msg.messageHeader.version,
-                                msg.header.channelRcvTimestampNs,
-                                msg.header.channelSndTimestampNs,
-                                data_fname=current_data_fname,
-                                data_start_index = data_i
-                            )
-                            # display(SpidersMessageEncoding.sbedecode(data.buffer))
-                            write(data_file, data.buffer)
-                            data_i += length(data.buffer)
-                            row_i = row_i_this
-                        end
+                        row_i_this = row_i + 1
+                        aeron_uri, aeron_stream = key
+                        msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
+                        # We'd rather not send strings containing NULL to SQlite as it will
+                        # store as BLOB instead of TEXT.
+                        # This trick gets around it.
+                        desc_no_nulls = view(msg.header.description, 1:lastindex(msg.header.description))
+                        bulk_insert_table[row_i_this] = (;
+                            msg.header.TimestampNs,
+                            msg.header.correlationId,
+                            description=desc_no_nulls,
+                            msg.messageHeader.schemaId,
+                            msg.messageHeader.templateId,
+                            msg.messageHeader.blockLength,
+                            msg.messageHeader.version,
+                            msg.header.channelRcvTimestampNs,
+                            msg.header.channelSndTimestampNs,
+                            aeron_uri,
+                            aeron_stream,
+                            data_fname=current_data_fname,
+                            data_start_index = data_i
+                        )
+                        # display(SpidersMessageEncoding.sbedecode(data.buffer))
+                        write(data_file, data.buffer)
+                        data_i += length(data.buffer)
+                        row_i = row_i_this
                     end
                 end
                 GC.safepoint() # To allow receiving SIGINT (CTRL+C)
