@@ -55,7 +55,7 @@ function main(ARGS)
     # *this* service, ie turning recording of other services on and off.
     conf = AeronConfig(
         uri="aeron:ipc",
-        stream=1006
+        stream=201
     )
 
 
@@ -94,7 +94,9 @@ function main(ARGS)
     bulk_insert_table = fill((;
         TimestampNs   = zero(Int64),
         correlationId = zero(Int64),
-        description   = view(cstatic""32, 1:0),
+        # description   = view(cstatic""32, 1:0),
+        # TODO: debuG slow
+        description   = "",
         schemaId      = zero(Int64),
         templateId    = zero(Int64),
         blockLength   = zero(Int64),
@@ -117,6 +119,8 @@ function main(ARGS)
     # then `enabled=1` or `enabled=0`, and finally a commit all with the same
     # correlation number.
     pending_commands_by_corr_id = Dict{Int,PendingCmd}()
+
+    pub_status = Aeron.publisher(ctx, AeronConfig(stream=conf.stream + 1, uri=conf.uri))
         
     Aeron.subscriber(ctx, conf) do control_subscription
 
@@ -152,33 +156,60 @@ function main(ARGS)
                 # Poll for incoming commands to *this* service
                 fragments, frame = Aeron.poll(control_subscription)
                 if !isnothing(frame)
-                    msgtype = SpidersMessageEncoding.sbemessagename(frame.buffer)
-                    if msgtype == :CommandMessage
-                        # Process command
-                        cmd = CommandMessage(frame.buffer, initialize=false)
-                        if !haskey(pending_commands_by_corr_id, cmd.header.correlationId)
-                            pending_commands_by_corr_id[cmd.header.correlationId] = PendingCmd()
+
+                    cmd = GenericMessage(frame.buffer)
+
+                    # We can have multiple event messages concatenated together.
+                    # In this case, we apply each sequentually in one go. 
+                    # This allows changing multiple parameters "atomically" between
+                    # loop updates.
+                    last_ind = 0
+                    while last_ind < length(frame.buffer) # TODO: don't fail if there are a few bytes left over
+                        @show last_ind
+                        data_span = @view frame.buffer[last_ind+1:end]
+                        event = EventMessage(data_span, initialize=false)
+                        event_data = @view data_span[1:sizeof(event)]
+                        # if event.name == "StatusRequest"
+                        #     # We handle this directly instead of in the state machine
+                        #     # since we have access to pub_status and they don't
+                        #     # In general, the state machine doesn't have to be aware
+                        #     # of the control and status channels
+                        #     send_status_update(sm, pub_status, event)
+                        #     last_ind += sizeof(event)
+                        #     continue
+                        # end
+
+                        # Dispatch event
+                        if !haskey(pending_commands_by_corr_id, event.header.correlationId)
+                            pending_commands_by_corr_id[event.header.correlationId] = PendingCmd()
                         end
-                        pending_cmd = pending_commands_by_corr_id[cmd.header.correlationId]
-                        if cmd.command == "uri"
-                            pending_cmd.uri = getargument(String, cmd)
-                        elseif cmd.command == "stream"
-                            pending_cmd.stream = getargument(Float64, cmd)
-                        elseif cmd.command == "enabled"
-                            pending_cmd.enabled = getargument(Float64, cmd) != 0
+                        pending_event = pending_commands_by_corr_id[event.header.correlationId]
+                        if event.name == "uri"
+                            pending_event.uri = getargument(String, event)
+                        elseif event.name == "stream"
+                            pending_event.stream = getargument(Float64, event)
+                        elseif event.name == "enabled"
+                            pending_event.enabled = getargument(Float64, event) != 0
+                        elseif event.name == "StatusRequest"
+                            @warn "StatusRequest not yet implemented for this service"
                         else
-                            @warn "Received unsupported command" cmd.command maxlog=1
+                            @warn "Received unsupported event name" event.name maxlog=1
                         end
-                    elseif msgtype == :CommitMessage
-                        cmd = CommitMessage(frame.buffer, initialize=false)
-                        pending_cmd = pending_commands_by_corr_id[cmd.header.correlationId]
-                        if pending_cmd.stream == 0
-                            @warn "can't subscribe without setting a non-zero stream number"
-                        end
-                        key = (pending_cmd.uri, pending_cmd.stream)
-                        if pending_cmd.enabled && !haskey(aeron_stream_recording_dict, key)
+                        # Republish this message to our status channel so that senders
+                        # can know we have received and dealt with their command
+                        # This is a form of *acknowledgement*
+                        Aeron.put!(pub_status, event_data)
+                        last_ind += sizeof(event)
+                    end
+                    pending_event = pending_commands_by_corr_id[cmd.header.correlationId]
+                    println("enabling")
+                    if pending_event.stream == 0
+                        @warn "can't subscribe without setting a non-zero stream number"
+                    else
+                        key = (pending_event.uri, pending_event.stream)
+                        if pending_event.enabled && !haskey(aeron_stream_recording_dict, key)
                             println("Opening subscription $key")
-                            conf = AeronConfig(;pending_cmd.uri, pending_cmd.stream)
+                            conf = AeronConfig(;pending_event.uri, pending_event.stream)
                             aeron_stream_recording_dict[key] = Aeron.subscriber(ctx,conf)
                         elseif haskey(aeron_stream_recording_dict, key)
                             sub = aeron_stream_recording_dict[key] 
@@ -187,9 +218,8 @@ function main(ARGS)
                             println("Closed subscription $key")
                         end
                     end
-                end
                 # If we're receiving a command, process it ASAP 
-                if fragments > 0
+                elseif fragments > 0
                     continue
                 end
 
@@ -214,6 +244,8 @@ function main(ARGS)
                     @time SQLite.load!(@view(bulk_insert_table[begin:row_i]), db, "message_index")
                     row_i = 0
                     last_commit_time = t
+                    println("flushing raw file")
+                    flush(data_file)
                 end
                 # Periodically roll over the raw data file so it doesn't grow to large
                 if data_i > data_archive_rollover_filesize_bytes
@@ -231,15 +263,17 @@ function main(ARGS)
 
                 # Loop and poll all recording subscriptions
                 for (key, sub) in aeron_stream_recording_dict
-                    fragments, data = Aeron.poll(sub)
-                    if !isnothing(data)
+                    fragments, frame = Aeron.poll(sub)
+                    if !isnothing(frame)
                         row_i_this = row_i + 1
                         aeron_uri, aeron_stream = key
-                        msg = GenericMessage(data.buffer; initialize=false) # Don't clobber schemaId etc.
+                        msg = GenericMessage(frame.buffer; initialize=false) # Don't clobber schemaId etc.
                         # We'd rather not send strings containing NULL to SQlite as it will
                         # store as BLOB instead of TEXT.
                         # This trick gets around it.
-                        desc_no_nulls = view(msg.header.description, 1:lastindex(msg.header.description))
+                        # desc_no_nulls = view(msg.header.description, 1:lastindex(msg.header.description))
+                        # TODO DEBUG SLOW
+                        desc_no_nulls = string(view(msg.header.description, 1:lastindex(msg.header.description)))
                         bulk_insert_table[row_i_this] = (;
                             msg.header.TimestampNs,
                             msg.header.correlationId,
@@ -255,9 +289,9 @@ function main(ARGS)
                             data_fname=current_data_fname,
                             data_start_index = data_i
                         )
-                        # display(SpidersMessageEncoding.sbedecode(data.buffer))
-                        write(data_file, data.buffer)
-                        data_i += length(data.buffer)
+                        # display(SpidersMessageEncoding.sbedecode(frame.buffer))
+                        write(data_file, frame.buffer)
+                        data_i += length(frame.buffer)
                         row_i = row_i_this
                     end
                 end
