@@ -1,5 +1,6 @@
 name = "ArchiverService"
 uuid = "8054f2ab-3db8-4d11-8f14-d3e261bc0a4e"
+version = "0.1.0"
 
 [deps]
 Aeron = "42ac8a32-990f-4d8c-aece-52d731103226"
