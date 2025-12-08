@@ -171,8 +171,6 @@ function output2fits(;
             end_time_Ns
         )
         df_events = DataFrame(DBInterface.execute(db, cmd))
-        
-        # need to identify unique combinations of (stream ID, event name)
 
         # Goal:
         # * Go through the table, between $start_time and $end_time (as given by TimestampNs column)

@@ -22,7 +22,16 @@ using StaticStrings
 
 # The full message goes onto disk. We roll over the files periodically.
 
-const file_mappers = Dict{String,Vector{UInt8}}()
+const file_mappers = Dict{String,Tuple{Vector{UInt8},IOStream}}()
+
+function close_mmaps()
+    for (dat,io) in values(file_mappers)
+        close(io)
+    end
+    empty!(file_mappers)
+    return
+end
+public close_mmaps
 
 include("service.jl")
 include("message-query.jl")

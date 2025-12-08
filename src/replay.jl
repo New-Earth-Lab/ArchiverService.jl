@@ -50,9 +50,13 @@ function replay_indices(aeronctx::AeronContext, dbfile::AbstractString, indices:
         for row in eachrow(df)
             fname = joinpath(dirname(dbfile), row.data_fname)
             if haskey(file_mappers, fname)
-                mapper = file_mappers[fname]
+                (mapper,io) = file_mappers[fname]
             else
-                mapper = file_mappers[fname] = Mmap.mmap(open(fname,read=true), Vector{UInt8}, shared=false) # shared=false, we don't need to see updates.
+                io = open(fname,read=true)
+                (mapper,io) = file_mappers[fname] = (
+                    Mmap.mmap(io, Vector{UInt8}, shared=false), # shared=false, we don't need to see updates.
+                    io
+                )
             end
             resize!(msg_buffer, row.data_stop_index-row.data_start_index)
             msg_buffer .= @view mapper[Int(row.data_start_index)+1:Int(row.data_stop_index)]

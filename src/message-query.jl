@@ -33,7 +33,7 @@ end
 function indices_time_range(dbfile::AbstractString, streams, timestampns_start::Number, timestampns_stop::Number)
     # Open DB in read only mode (so that the archiver can keep writing)
     db = SQLite.DB("file:$dbfile?mode=ro")
-    ii = indices_time_range(dbfile, streams, timestampns_start, timestampns_stop)
+    ii = indices_time_range(db, streams, timestampns_start, timestampns_stop)
     close(db)
     return ii
 end

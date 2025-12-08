@@ -100,25 +100,38 @@ TODO: currenly the SQL query is tremedously poorly optimized. see comment.
 """
 function select_messages(MessageType, db::SQLite.DB, dbfname, indices)
     
-    # TODO: probably more efficient to make like a temporary table and join against it or something.
-    rowids_str = join(string.(indices), ",")
-    df = DataFrame(DBInterface.execute(db, "SELECT * FROM message_index where rowid IN ($rowids_str)"))
+    if indices == (:)
+        df = DataFrame(DBInterface.execute(db, "SELECT * FROM message_index"))
+    else
+        # TODO: probably more efficient to make like a temporary table and join against it or something.
+        rowids_str = join(string.(indices), ",")
+        df = DataFrame(DBInterface.execute(db, "SELECT * FROM message_index where rowid IN ($rowids_str)"))
+    end
     # println("Array Messages matching those timestamp criteria:")
     # display(df)
     if size(df,1) == 0
         @warn "no images matching those criteria"
-        return MessageType[]
+        return Union{Missing,MessageType}[]
     end
 
-   
-
-    messages = MessageType[]
+    messages = Union{Missing,MessageType}[]
     for row in eachrow(df)
         fname = joinpath(dirname(dbfname), row.data_fname)
+        local mapper
         if haskey(file_mappers, fname)
-            mapper = file_mappers[fname]
+            (mapper,io) = file_mappers[fname]
         else
-            mapper = file_mappers[fname] = Mmap.mmap(open(fname,read=true), Vector{UInt8})
+            try
+                io = open(fname,read=true)
+                (mapper,io) = file_mappers[fname] = (
+                    Mmap.mmap(io, Vector{UInt8}),
+                    io
+                )
+            catch
+                # file not found or corrupt or something
+                push!(messages, missing)
+                continue
+            end
         end
         msg_start_buffer = @view mapper[Int(row.data_start_index)+1:end]
         try
