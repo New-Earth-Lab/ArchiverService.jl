@@ -41,6 +41,6 @@ include("save-messages.jl")
 
 @main
 
-public main, indices_corr_range, indices_time_range, replay_indices, save_messages, select_messages
+public main, indices_corr_range, indices_time_range, replay_indices, save_messages, select_messages, DataLossEvent, write_data_loss_report
 
 end

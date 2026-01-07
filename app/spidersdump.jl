@@ -23,10 +23,14 @@ function parse_commandline()
             help = "Reference date for times (default: today). Use ISO format (e.g., 2023-09-07T12:34:56)"
             dest_name = "ref_date"
             default = nothing
+        "--archive-date"
+            help = "UTC Data Folder to search in (not necessarily the date/time that you want to query)"
+            dest_name = "archive_date"
+            default = nothing
         "--tz"
-            help = "Local timezone conversion to UTC (e.g. Pacific time needs -8)"
+            help = "Local timezone offset from UTC in hours (e.g., -10 for Hawaii, -8 for Pacific). Default is 0 (UTC)."
             dest_name = "timezone_hours"
-            default = "-8"
+            default = "0"
     end
 
     return parse_args(s)
@@ -44,14 +48,23 @@ function (@main)(ARGS)
             error("Invalid date format for --ref-date. Please use ISO format (e.g., 2023-09-07T12:34:56)")
         end
     end
+
+    if parsed_args["archive_date"] !== nothing
+        try
+            archive_date = Date(parsed_args["archive_date"])
+        catch e
+            error("Invalid date format for --archive-date. Please use ISO format (e.g., 2023-09-07)")
+        end
+    else
+        archive_date =nothing
+    end
     
     # Call the output2fits function
     ArchiverService.output2fits(;
         start_time = parsed_args["start_time"],
         end_time = parsed_args["end_time"],
         ref_date = ref_date,
-        timezone_hours = tryparse(Float64,parsed_args["timezone_hours"])
+        timezone_hours = tryparse(Float64,parsed_args["timezone_hours"]),
+        archive_date
     )
 end
-
-main(ARGS)
